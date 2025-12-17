@@ -1,19 +1,18 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:math'; // 🆕 新增：用於計算 max
 import 'package:flutter/material.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:intl/intl.dart'; // 用於時間格式化，需在 pubspec.yaml 加入 intl
+import 'package:intl/intl.dart';
 
 // ==========================================
 // 1. 設定與 STM32 協調好的 UUID 與參數
 // ==========================================
 const String TARGET_DEVICE_NAME = "BikeLocker";
 
-// Base UUID: 0000xxxx-0000-1000-8000-00805F9B34FB
 final Uuid SERVICE_UUID = Uuid.parse("0000ffe0-0000-1000-8000-00805f9b34fb");
 
-// Characteristics
 final Uuid CHAR_LOCK_UUID = Uuid.parse("0000ffe1-0000-1000-8000-00805f9b34fb"); // Control
 final Uuid CHAR_HISTORY_UUID = Uuid.parse("0000ffe2-0000-1000-8000-00805f9b34fb"); // History
 final Uuid CHAR_SPEED_UUID = Uuid.parse("0000ffe3-0000-1000-8000-00805f9b34fb"); // Speed
@@ -49,11 +48,9 @@ class BikeHomePage extends StatefulWidget {
 }
 
 class _BikeHomePageState extends State<BikeHomePage> {
-  // BLE 狀態管理
   StreamSubscription<DiscoveredDevice>? _scanSub;
   StreamSubscription<ConnectionStateUpdate>? _connSub;
 
-  // 數據訂閱流
   StreamSubscription<List<int>>? _lockNotifySub;
   StreamSubscription<List<int>>? _historyNotifySub;
   StreamSubscription<List<int>>? _speedNotifySub;
@@ -64,11 +61,14 @@ class _BikeHomePageState extends State<BikeHomePage> {
   bool _isScanning = false;
   String _statusText = "準備就緒";
 
-  // 應用數據
-  String _lockState = "未知"; // 鎖定狀態
-  double _currentSpeed = 0.0; // km/h
-  double _burntCalories = 0.0; // kcal
-  List<String> _historyLogs = []; // 異常紀錄列表
+  String _lockState = "未知";
+  double _currentSpeed = 0.0;
+  double _burntCalories = 0.0;
+  List<String> _historyLogs = [];
+
+  // 🆕 新增：用於批次處理歷史紀錄的緩衝區與計時器
+  Timer? _historyBatchTimer;
+  final List<int> _tempHistoryValues = [];
 
   @override
   void initState() {
@@ -83,7 +83,6 @@ class _BikeHomePageState extends State<BikeHomePage> {
   }
 
   Future<void> _initPermissions() async {
-    // 請求必要的藍牙與定位權限
     await [
       Permission.bluetooth,
       Permission.location,
@@ -99,7 +98,7 @@ class _BikeHomePageState extends State<BikeHomePage> {
     setState(() {
       _isScanning = true;
       _statusText = "正在搜尋 $TARGET_DEVICE_NAME...";
-      _historyLogs.clear(); // 清除舊紀錄
+      _historyLogs.clear();
     });
 
     _scanSub?.cancel();
@@ -133,8 +132,14 @@ class _BikeHomePageState extends State<BikeHomePage> {
           _connectedDevice = device;
           _statusText = "已連線";
         });
-        // 連線成功後，訂閱所有特徵值
-        _subscribeToAllCharacteristics(device.id);
+
+        // 🛠️ 修正：加入 500ms 延遲，確保連線穩定後再讀取
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) { // 確保頁面還在
+            _subscribeToAllCharacteristics(device.id);
+          }
+        });
+
       } else if (state.connectionState == DeviceConnectionState.disconnected) {
         _handleDisconnect();
       }
@@ -153,11 +158,13 @@ class _BikeHomePageState extends State<BikeHomePage> {
       _currentSpeed = 0.0;
       _burntCalories = 0.0;
     });
-    // 取消所有訂閱
     _lockNotifySub?.cancel();
     _historyNotifySub?.cancel();
     _speedNotifySub?.cancel();
     _calorieNotifySub?.cancel();
+    // 🆕 清除計時器與緩衝區
+    _historyBatchTimer?.cancel();
+    _tempHistoryValues.clear();
   }
 
   Future<void> _disconnect() async {
@@ -168,50 +175,87 @@ class _BikeHomePageState extends State<BikeHomePage> {
   // ==========================================
   // 3. 訂閱通知與數據解析 (核心邏輯)
   // ==========================================
-  void _subscribeToAllCharacteristics(String deviceId) {
+  Future<void> _subscribeToAllCharacteristics(String deviceId) async { // ✅ 已加入 async
 
-    // 1. Lock Control (FFE1) - 接收鎖定狀態變化
+    // 1. Lock Control (FFE1)
     final lockChar = QualifiedCharacteristic(
         serviceId: SERVICE_UUID, characteristicId: CHAR_LOCK_UUID, deviceId: deviceId);
 
-    _lockNotifySub = _ble.subscribeToCharacteristic(lockChar).listen((data) {
-      // 預期 2 bytes: [Result, State]
-      if (data.length >= 2) {
-        // Byte 1 is State: 0x01 Locked, 0x00 Unlocked
-        final state = data[1];
+    // 🛠️ 修正：主動讀取 + 詳細除錯 Log
+    try {
+      print("🚀 準備讀取初始鎖定狀態..."); // Debug Log
+      final initialData = await _ble.readCharacteristic(lockChar);
+      print("📩 讀取到的原始數據 (Bytes): $initialData"); // Debug Log - 請看這裡印出什麼
+
+      if (initialData.length >= 2) {
+        final state = initialData[1];
         setState(() {
           _lockState = (state == 0x01) ? "已上鎖 🔒" : "已解鎖 🔓";
+        });
+      } else if (initialData.isNotEmpty) {
+        // 容錯：如果 nRF Connect 只填了 1 byte (例如 [1])
+        final state = initialData[0];
+        setState(() {
+          _lockState = (state == 0x01) ? "已上鎖 🔒" : "已解鎖 🔓";
+        });
+      } else {
+        print("⚠️ 警告：讀取到的數據為空！請檢查 nRF Connect 設定");
+      }
+    } catch (e) {
+      print("❌ 讀取初始狀態失敗: $e");
+    }
+
+    // 繼續訂閱
+    _lockNotifySub = _ble.subscribeToCharacteristic(lockChar).listen((data) {
+      if (data.length >= 2) {
+        final state = data[1];
+        setState(() {
+          if (state == 0x01) {
+            _lockState = "已上鎖 🔒";
+            // 上鎖時保留熱量數值，不歸零
+          } else {
+            _lockState = "已解鎖 🔓";
+            // 只有在「解鎖」時才歸零熱量，準備開始新的一次騎乘
+            _burntCalories = 0.0;
+          }
+        });
+      } else if (data.length == 1) { // 增加容錯
+        final state = data[0];
+        setState(() {
+          if (state == 0x01) {
+            _lockState = "已上鎖 🔒";
+          } else {
+            _lockState = "已解鎖 🔓";
+            _burntCalories = 0.0;
+          }
         });
       }
     });
 
-    // 2. Abnormal History (FFE2) - 接收異常時間戳記
+    // 2. History (FFE2) - 🆕 修改為 Uptime 回推邏輯
     final historyChar = QualifiedCharacteristic(
         serviceId: SERVICE_UUID, characteristicId: CHAR_HISTORY_UUID, deviceId: deviceId);
 
     _historyNotifySub = _ble.subscribeToCharacteristic(historyChar).listen((data) {
-      // 預期 UInt32 (4 bytes), Little Endian
       if (data.length >= 4) {
         final bd = ByteData.sublistView(Uint8List.fromList(data));
-        final timestamp = bd.getUint32(0, Endian.little);
+        // 這裡讀到的是開機秒數 (Uptime Seconds)
+        final uptime = bd.getUint32(0, Endian.little);
 
-        // 轉換 Unix Timestamp 為可讀時間
-        final date = DateTime.fromMillisecondsSinceEpoch(timestamp * 1000);
-        final formatted = DateFormat('yyyy/MM/dd HH:mm:ss').format(date);
+        // 收集數據到緩衝區
+        _tempHistoryValues.add(uptime);
 
-        setState(() {
-          // 新增到列表頂端
-          _historyLogs.insert(0, "⚠️ 異常震動: $formatted");
-        });
+        // 重置/啟動防抖計時器 (等待所有封包到齊)
+        _historyBatchTimer?.cancel();
+        _historyBatchTimer = Timer(const Duration(milliseconds: 500), _processHistoryBatch);
       }
     });
 
-    // 3. Speed (FFE3) - 接收速度
+    // 3. Speed (FFE3)
     final speedChar = QualifiedCharacteristic(
         serviceId: SERVICE_UUID, characteristicId: CHAR_SPEED_UUID, deviceId: deviceId);
 
     _speedNotifySub = _ble.subscribeToCharacteristic(speedChar).listen((data) {
-      // 預期 UInt16 (2 bytes), Unit: 0.1 km/h
       if (data.length >= 2) {
         final bd = ByteData.sublistView(Uint8List.fromList(data));
         final rawSpeed = bd.getUint16(0, Endian.little);
@@ -221,20 +265,72 @@ class _BikeHomePageState extends State<BikeHomePage> {
       }
     });
 
-    // 4. Calorie (FFE4) - 接收卡路里
+    // 4. Calorie (FFE4)
     final calChar = QualifiedCharacteristic(
         serviceId: SERVICE_UUID, characteristicId: CHAR_CALORIE_UUID, deviceId: deviceId);
 
     _calorieNotifySub = _ble.subscribeToCharacteristic(calChar).listen((data) {
-      // 預期 UInt16 (2 bytes), Unit: 0.1 cal (User requirement)
       if (data.length >= 2) {
         final bd = ByteData.sublistView(Uint8List.fromList(data));
         final rawCal = bd.getUint16(0, Endian.little);
-        setState(() {
-          _burntCalories = rawCal / 10.0;
-        });
+
+        // 只有在「已解鎖」狀態下才更新熱量
+        // 這樣上鎖後即使 STM32 傳來 0 或其他值，UI 也會保留最後的數據
+        if (_lockState.contains("已解鎖")) {
+          setState(() {
+            _burntCalories = rawCal / 10.0;
+          });
+        }
       }
     });
+  }
+
+  // 🆕 新增：批次處理歷史紀錄
+  void _processHistoryBatch() {
+    if (_tempHistoryValues.isEmpty) return;
+
+    // 情況 A: 收到 0，代表無異常
+    if (_tempHistoryValues.contains(0)) {
+      setState(() {
+        _historyLogs.insert(0, "✅ 狀態正常 (無異常震動)");
+      });
+      _tempHistoryValues.clear();
+      return;
+    }
+
+    // 情況 B: 有異常紀錄
+    // 假設最大值是「解鎖當下的 Uptime」(也就是現在)
+    int unlockUptime = _tempHistoryValues.reduce(max);
+    final now = DateTime.now();
+    List<String> newLogs = [];
+
+    // 排序 (從小到大)，確保處理順序
+    _tempHistoryValues.sort();
+
+    for (var uptime in _tempHistoryValues) {
+      // 過濾掉解鎖當下的那筆紀錄
+      if (uptime == unlockUptime) continue;
+
+      // 計算時間差：異常發生在幾秒前
+      int diffSeconds = unlockUptime - uptime;
+      if (diffSeconds < 0) diffSeconds = 0; // 防呆
+
+      // 回推真實時間
+      final eventTime = now.subtract(Duration(seconds: diffSeconds));
+      final formatted = DateFormat('yyyy/MM/dd HH:mm:ss').format(eventTime);
+
+      newLogs.add("⚠️ 異常震動: $formatted");
+    }
+
+    if (newLogs.isNotEmpty) {
+      setState(() {
+        // 反轉列表，讓最新的紀錄顯示在最上面
+        _historyLogs.insertAll(0, newLogs.reversed);
+      });
+    }
+
+    // 清空緩衝區
+    _tempHistoryValues.clear();
   }
 
   // ==========================================
@@ -249,13 +345,10 @@ class _BikeHomePageState extends State<BikeHomePage> {
         deviceId: _connectedDevice!.id
     );
 
-    // Command: 0x01 Lock, 0x02 Unlock, 0x03 Ring
-    // 傳送單一 Byte
     final data = Uint8List.fromList([command]);
 
     try {
       await _ble.writeCharacteristicWithResponse(lockChar, value: data);
-
       String msg = "";
       switch(command) {
         case 0x01: msg = "發送: 上鎖"; break;
@@ -287,7 +380,6 @@ class _BikeHomePageState extends State<BikeHomePage> {
       ),
       body: Column(
         children: [
-          // 狀態列
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(12),
@@ -301,7 +393,6 @@ class _BikeHomePageState extends State<BikeHomePage> {
               ),
             ),
           ),
-
           Expanded(
             child: _isConnected ? _buildDashboard() : _buildConnectScreen(),
           ),
@@ -336,7 +427,6 @@ class _BikeHomePageState extends State<BikeHomePage> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        // 1. 鎖定狀態與控制
         Card(
           elevation: 4,
           child: Padding(
@@ -373,10 +463,7 @@ class _BikeHomePageState extends State<BikeHomePage> {
             ),
           ),
         ),
-
         const SizedBox(height: 16),
-
-        // 2. 騎乘儀表板
         Row(
           children: [
             Expanded(child: _buildInfoCard("目前時速", "${_currentSpeed.toStringAsFixed(1)}", "km/h", Icons.speed)),
@@ -384,10 +471,7 @@ class _BikeHomePageState extends State<BikeHomePage> {
             Expanded(child: _buildInfoCard("消耗熱量", "${_burntCalories.toStringAsFixed(1)}", "kcal", Icons.local_fire_department)),
           ],
         ),
-
         const SizedBox(height: 16),
-
-        // 3. 異常紀錄 Log
         const Text("  異常震動紀錄", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
         const SizedBox(height: 8),
         Container(
