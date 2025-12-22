@@ -27,7 +27,15 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include <stdint.h>
-   
+
+#include "stm32l4xx_hal.h" // 務必確認這行存在
+
+void lcd_init (void);   // 初始化
+void lcd_send_cmd (char cmd);  // 送指令
+void lcd_send_data (char data);  // 送資料
+void lcd_send_string (char *str); // 送字串
+void lcd_put_cur(int row, int col); // 移動游標
+void lcd_clear (void); // 清除螢幕
 /** @addtogroup BSP
   * @{
   */

@@ -1,9 +1,9 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
+  ****************************************************************************
   * @file           : main.c
   * @brief          : Main program body
-  ******************************************************************************
+  ****************************************************************************
   * @attention
   *
   * Copyright (c) 2025 STMicroelectronics.
@@ -11,9 +11,9 @@
   *
   * This software is licensed under terms that can be found in the LICENSE file
   * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
+  * If no LICENSE file comes with this software, it is provided    ['AS-IS.
   *
-  ******************************************************************************
+  ****************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -28,11 +28,20 @@
 #include <stdlib.h>
 #include "b_l475e_iot01a1.h"
 #include <time.h>
+#include <math.h>
+#include <string.h>
+#include "bluenrg_gap.h"
+#include "bluenrg_aci.h"
+#include "hci.h"
 /* 宣告外部變數 (CubeMX 生成的 I2C handle) */
 extern I2C_HandleTypeDef hi2c2;
 
 // LSM6DSL 的 I2C 位址 (寫入)
 #define LSM6DSL_ADDR  0xD4
+// 定義閾值 (根據上面的建議)
+#define THRESHOLD_LOW   0.05f
+#define THRESHOLD_MED   0.25f
+#define THRESHOLD_HIGH  0.60f
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,11 +62,15 @@ extern I2C_HandleTypeDef hi2c2;
 /* Private variables ---------------------------------------------------------*/
 DFSDM_Channel_HandleTypeDef hdfsdm1_channel1;
 
+I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
 
 QSPI_HandleTypeDef hqspi;
 
 RTC_HandleTypeDef hrtc;
+
+TIM_HandleTypeDef htim2;
+DMA_HandleTypeDef hdma_tim2_ch1;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
@@ -81,12 +94,50 @@ typedef enum {
   STATE_UNLOCKED
 } SystemState_t;
 
+typedef enum {
+    MODE_IDLE,
+    MODE_LOW,
+    MODE_MED,
+    MODE_HIGH
+} BikeMode;
+
 SystemState_t currentState = STATE_LOCKED; // 預設上鎖
 
 // 2. 按鈕節奏偵測變數 (短-短-長)
 uint32_t btn_press_start_time = 0; // 按下的時間點
 uint8_t  btn_pattern_stage = 0;    // 目前進度: 0=初始, 1=短1完成, 2=短2完成
 uint32_t last_btn_activity = 0;    // 上次按鈕操作時間 (用來重置過久的輸入)
+
+// --- 變數宣告 ---
+volatile float total_kcal = 0.0f;
+volatile const float user_weight = 70.0f;
+
+int16_t pDataXYZ[3] = {0};
+
+float current_mets = 1.0f;
+
+//GPIO_PinState last_btn_state = BTN_PRESSED_STATE;
+GPIO_PinState current_btn_state;
+
+//uint32_t btn_press_start_time = 0;
+//uint32_t last_btn_activity = 0;
+//uint8_t  btn_pattern_stage = 0;
+
+static uint32_t last_motion_tick = 0;
+
+// [新增] 異常紀錄緩衝區
+uint32_t motion_history[MAX_HISTORY_LEN]; // 存放時間戳 (秒)
+uint8_t  history_count = 0;               // 目前存了幾筆
+uint8_t  history_head = 0;                // 環形寫入位置 (如果想做循環覆蓋的話)
+
+// 用來防止震動一次就寫入 10 次的 Debounce 計時器
+uint32_t last_motion_save_tick = 0;
+
+// 熱量積分時間點
+static uint32_t last_kcal_calc_tick = 0;
+
+static uint32_t last_print = 0;
+char lcd_buffer[64];
 
 // 定義時間閾值 (毫秒)
 #define BTN_PRESSED_STATE  GPIO_PIN_RESET  // 假設 PC13 按下是 Low
@@ -99,10 +150,14 @@ uint32_t last_btn_activity = 0;    // 上次按鈕操作時間 (用來重置過�
 #define MOTION_COOLDOWN   2000  // 冷卻時間 2秒 (避免一秒鐘紀錄10次)
 #define MAX_LOG_SIZE      10    // 最多紀錄幾筆異常 (超過覆蓋舊的)
 
+#define AUTO_LOCK_TIMEOUT 60000
+
 typedef struct {
     uint32_t event_tick; // 發生時間 (HAL_GetTick)
     //int16_t  max_g;     // 當下測得的最大震動值 (參考用)
 } SecurityLog;
+
+GPIO_PinState last_btn_state = BTN_PRESSED_STATE;
 
 SecurityLog alertLogs[MAX_LOG_SIZE];
 uint8_t logHead = 0;   // 寫入位置
@@ -114,11 +169,27 @@ int16_t last_xyz[3] = {0};
 int16_t curr_xyz[3] = {0};
 
 volatile uint8_t g_MotionDetected = 0;
+
+#define LCD_ADDR 0x4E
+
+extern I2C_HandleTypeDef hi2c1; // 確保可以使用 i2c1
+
+// --- 3144E 測速變數 ---
+#define WHEEL_CIRCUMFERENCE 2.0f  // 輪子周長 (單位: 公尺)，請依實際調整
+#define HALL_DMA_SIZE 2           // 緩衝區大小 (收2次訊號算一次速度)
+
+uint32_t hall_buff[HALL_DMA_SIZE]; // 存放 DMA 搬運來的時間點
+volatile float bike_speed_kmh = 0.0f; // 算出來的時速 (全域變數)
+volatile uint32_t last_hall_tick = 0; // 用來判斷車子是不是停了
+
+extern volatile uint8_t request_buzzer;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_DFSDM1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_QUADSPI_Init(void);
@@ -126,22 +197,136 @@ static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_RTC_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_TIM2_Init(void);
 void StartDefaultTask(void const * argument);
 void StartSystemTask(void const * argument);
 void StartSensorTask(void const * argument);
 void StartCommTask(void const * argument);
+void LCD_Clear(void);
 
 /* USER CODE BEGIN PFP */
 void Enable_LSM6DSL_WakeUp(uint8_t threshold);
+BikeMode Determine_Intensity(float ax, float ay, float az);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-int __io_putchar(int ch)
-{
-	HAL_UART_Transmit(&huart1, (uint8_t *)&ch, 1, 0XFFFF);
-	return ch;
+
+// --- 內部底層函式 ---
+void LCD_Send_Nibble(uint8_t nibble, uint8_t rs) {
+    uint8_t data = nibble & 0xF0; // 取高 4 位
+    data |= 0x08;                 // 保持背光開啟 (Bit 3)
+    if (rs) data |= 0x01;         // 設定 RS 位
+
+    uint8_t data_block[2];
+
+    // 1. 準備資料 + EN=1 (Enable Pulse High)
+    data_block[0] = data | 0x04;
+    // 2. 準備資料 + EN=0 (Enable Pulse Low) -> 資料被寫入
+    data_block[1] = data & ~0x04;
+
+    // 發送 I2C
+    HAL_I2C_Master_Transmit(&hi2c1, LCD_ADDR, data_block, 2, 100);
+    HAL_Delay(1); // 等待寫入完成
 }
+
+// 發送一個完整的 Byte (指令或資料)
+// 會拆成兩次 Nibble 發送
+void LCD_Send_Byte(uint8_t val, uint8_t rs) {
+    LCD_Send_Nibble(val & 0xF0, rs);        // 先送高 4 位
+    LCD_Send_Nibble((val << 4) & 0xF0, rs); // 再送低 4 位
+}
+
+// 寫指令
+void LCD_Write_Cmd(uint8_t cmd) {
+    LCD_Send_Byte(cmd, 0);
+}
+
+// 寫資料 (顯示字元)
+void LCD_Write_Data(uint8_t data) {
+    LCD_Send_Byte(data, 1);
+}
+
+// 顯示字串
+void LCD_String(char *str) {
+    int count = 0;
+    // 只要字串沒結束，且寫入少於 20 個字，就繼續寫
+    while (*str && count < 20) {
+        LCD_Write_Data(*str++);
+        count++;
+
+    }
+}
+// 設定游標位置
+void LCD_SetCursor(uint8_t row, uint8_t col) {
+    uint8_t row_offsets[] = {0x00, 0x40, 0x14, 0x54};
+    if (row >= 4) row = 0;
+    LCD_Write_Cmd(0x80 | (col + row_offsets[row]));
+}
+
+// --- 初始化 (最重要的一步) ---
+void LCD_Init(void) {
+    HAL_Delay(50); // 上電後等待電壓穩定
+
+    // 1. 特殊啟動序列 (Magic Sequence)
+    // 必須連續送三次 0x03 (只送 Nibble，不能送 Byte!)
+    LCD_Send_Nibble(0x30, 0); HAL_Delay(5);
+    LCD_Send_Nibble(0x30, 0); HAL_Delay(1);
+    LCD_Send_Nibble(0x30, 0); HAL_Delay(1);
+
+    // 2. 切換到 4-bit 模式
+    LCD_Send_Nibble(0x20, 0); HAL_Delay(1);
+
+    // 從這裡開始，螢幕才真正進入 4-bit 模式，可以用完整的 Byte 指令了
+
+    // 3. 設定參數
+    LCD_Write_Cmd(0x28); // 4-bit, 2 lines, 5x7 font
+    HAL_Delay(1);
+    LCD_Write_Cmd(0x08); // 關閉顯示
+    HAL_Delay(1);
+    LCD_Write_Cmd(0x01); // 清除螢幕 (Clear)
+    HAL_Delay(2);        // Clear 指令需要比較久
+    LCD_Write_Cmd(0x06); // 輸入模式 (文字向右)
+    HAL_Delay(1);
+    LCD_Write_Cmd(0x0C); // 開啟顯示, 關閉游標
+}
+// I2C 強制重置序列
+// 手動控制 GPIO 模擬 9 個 Clock 脈衝，解開被 LCD 拉住的 SDA 線
+void I2C_ForceReset(void) {
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    // 1. 開啟 GPIO 時鐘 (根據你的腳位修改，這裡是 GPIOB)
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    // 2. 設定 SCL (PB6) 和 SDA (PB7) 為 Output Open-Drain
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    // 3. 設定 SDA 為 High
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+
+    // 4. 產生 9 個 Clock 脈衝 (Toggle SCL)
+    for(int i=0; i<9; i++) {
+        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET); // SCL Low
+        HAL_Delay(1);
+	    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // SCL High
+        HAL_Delay(1);
+    }
+
+    // 5. 產生 STOP condition
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // SDA Low
+    HAL_Delay(1);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);   // SCL High
+    HAL_Delay(1);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);   // SDA High
+    HAL_Delay(1);
+
+    // 之後 MX_I2C1_Init() 會接手把腳位設回 I2C 模式
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -161,7 +346,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  I2C_ForceReset(); // 加在這裡
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -172,18 +357,31 @@ int main(void)
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
-  MX_USART1_UART_Init();
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_DFSDM1_Init();
   MX_I2C2_Init();
   MX_QUADSPI_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   MX_RTC_Init();
-  /*MX_BlueNRG_MS_Init();*/
+  MX_USART1_UART_Init();
+  MX_I2C1_Init();
+  MX_TIM2_Init();
+  MX_BlueNRG_MS_Init();
+
   /* USER CODE BEGIN 2 */
+  LCD_Init();
+  LCD_SetCursor(0, 0);
+  LCD_String("BikeLocker Ready!");
+  LCD_SetCursor(1, 0); // 第2行 第1格
+  LCD_String("Status: LOCKED");
+  HAL_Delay(500); // 等一下，讓畫面穩定
   BSP_ACCELERO_Init();
-  Enable_LSM6DSL_WakeUp(4);
+  // 啟動 Timer 2 Channel 3 的 DMA 模式
+  HAL_TIM_IC_Start_DMA(&htim2, TIM_CHANNEL_1, hall_buff, 1);
+  Enable_LSM6DSL_WakeUp(2);
+
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -208,7 +406,7 @@ int main(void)
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of SystemTask */
-  osThreadStaticDef(SystemTask, StartSystemTask, osPriorityHigh, 0, 512, SystemTaskBuffer, &SystemTaskControlBlock);
+  osThreadStaticDef(SystemTask, StartSystemTask, osPriorityHigh, 0, 256, SystemTaskBuffer, &SystemTaskControlBlock);
   SystemTaskHandle = osThreadCreate(osThread(SystemTask), NULL);
 
   /* definition and creation of SensorTask */
@@ -338,6 +536,54 @@ static void MX_DFSDM1_Init(void)
 }
 
 /**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x10D19CE4;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief I2C2 Initialization Function
   * @param None
   * @retval None
@@ -458,19 +704,19 @@ static void MX_RTC_Init(void)
 
   /** Initialize RTC and set the Time and Date
   */
-  sTime.Hours = 0x12;
-  sTime.Minutes = 0x00;
-  sTime.Seconds = 0x00;
+  sTime.Hours = 0;
+  sTime.Minutes = 0;
+  sTime.Seconds = 0;
   sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
   sTime.StoreOperation = RTC_STOREOPERATION_RESET;
   if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK)
   {
     Error_Handler();
   }
-  sDate.WeekDay = RTC_WEEKDAY_TUESDAY;
-  sDate.Month = RTC_MONTH_NOVEMBER;
-  sDate.Date = 0X25;
-  sDate.Year = 0X25;
+  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.Month = RTC_MONTH_JANUARY;
+  sDate.Date = 1;
+  sDate.Year = 0;
 
   if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN) != HAL_OK)
   {
@@ -479,6 +725,54 @@ static void MX_RTC_Init(void)
   /* USER CODE BEGIN RTC_Init 2 */
 
   /* USER CODE END RTC_Init 2 */
+
+}
+
+/**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 79;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 4294967295;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_FALLING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
 
 }
 
@@ -588,6 +882,22 @@ static void MX_USB_OTG_FS_PCD_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel5_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -613,8 +923,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, ARD_D10_Pin|SPBTLE_RF_RST_Pin|ARD_D9_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, ARD_D8_Pin|ISM43362_BOOT0_Pin|ISM43362_WAKEUP_Pin|LED2_Pin
-                          |SPSGRF_915_SDN_Pin|ARD_D5_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, BUZZER_Pin|ARD_D8_Pin|ISM43362_BOOT0_Pin|ISM43362_WAKEUP_Pin
+                          |LED2_Pin|SPSGRF_915_SDN_Pin|ARD_D5_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, USB_OTG_FS_PWR_EN_Pin|PMOD_RESET_Pin|STSAFE_A100_RESET_Pin, GPIO_PIN_RESET);
@@ -660,13 +970,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : ARD_D1_Pin ARD_D0_Pin */
-  GPIO_InitStruct.Pin = ARD_D1_Pin|ARD_D0_Pin;
+  /*Configure GPIO pin : ARD_D0_Pin */
+  GPIO_InitStruct.Pin = ARD_D0_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   GPIO_InitStruct.Alternate = GPIO_AF8_UART4;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(ARD_D0_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : ARD_D10_Pin SPBTLE_RF_RST_Pin ARD_D9_Pin */
   GPIO_InitStruct.Pin = ARD_D10_Pin|SPBTLE_RF_RST_Pin|ARD_D9_Pin;
@@ -674,14 +984,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : ARD_D4_Pin */
-  GPIO_InitStruct.Pin = ARD_D4_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF1_TIM2;
-  HAL_GPIO_Init(ARD_D4_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : ARD_D7_Pin */
   GPIO_InitStruct.Pin = ARD_D7_Pin;
@@ -703,11 +1005,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(ARD_D3_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : ARD_D6_Pin */
-  GPIO_InitStruct.Pin = ARD_D6_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG_ADC_CONTROL;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(ARD_D6_GPIO_Port, &GPIO_InitStruct);
+  /*Configure GPIO pin : BUZZER_Pin */
+  GPIO_InitStruct.Pin = BUZZER_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(BUZZER_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : ARD_D8_Pin ISM43362_BOOT0_Pin ISM43362_WAKEUP_Pin LED2_Pin
                            SPSGRF_915_SDN_Pin ARD_D5_Pin SPSGRF_915_SPI3_CSN_Pin */
@@ -762,14 +1065,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : ARD_D15_Pin ARD_D14_Pin */
-  GPIO_InitStruct.Pin = ARD_D15_Pin|ARD_D14_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
@@ -785,7 +1080,7 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void Enable_LSM6DSL_WakeUp(uint8_t threshold)
 {
-    uint8_t regData = 0;
+    uint8_t regData = 0x02;
 
     // 1. 設定 TAP_CFG (0x58) 暫存器 -> 開啟中斷功能
     // Bit 7 (INTERRUPTS_ENABLE) = 1
@@ -808,7 +1103,7 @@ void Enable_LSM6DSL_WakeUp(uint8_t threshold)
     regData = 0x20; // Binary: 0010 0000
     HAL_I2C_Mem_Write(&hi2c2, LSM6DSL_ADDR, 0x5E, I2C_MEMADD_SIZE_8BIT, &regData, 1, 100);
 
-    printf("LSM6DSL Wake-up Mode Enabled!\r\n");
+    //printf("LSM6DSL Wake-up Mode Enabled!\r\n");
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
@@ -819,53 +1114,65 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     }
 }
 
-void PrintLogs_BootPlusElapsed(void) {
+// DMA 傳輸完成回呼函式 (buffer 填滿時觸發)
 
-    printf("\r\n=== Security Report ===\r\n");
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
+    {
+        // 1. 取得最新的時間 (因為 DMA Size=1，永遠在 buff[0])
+        uint32_t current_capture = hall_buff[0];
 
-    if (logCount == 0) {
-        printf("No events.\r\n");
-        return;
+        // 2. 定義靜態變數，用來記住「上一次」的時間 (離開函式後數值會保留)
+        static uint32_t last_capture = 0;
+
+        // 3. 計算時間差
+        // 利用 unsigned int 的特性，直接相減就能自動處理 Timer 溢位 (Overflow)
+        // 例如：現在 10 - 上次 4294967290 = 16 (正確差值)
+        uint32_t diff = current_capture - last_capture;
+
+        // 4. 更新「上一次」的時間，供下一圈使用
+        last_capture = current_capture;
+
+        // --- 速度計算邏輯 ---
+        // 簡單濾波: 假設輪子最快 10ms 轉一圈 (時速約 720km/h)，過濾掉彈跳雜訊
+        // 如果 diff 太大 (例如 > 20000000 = 20秒)，可能是剛開機的第一筆，也忽略
+        if (diff > 10000 && diff < 20000000)
+        {
+            float time_sec = diff / 1000000.0f; // 轉成秒
+            float speed_mps = WHEEL_CIRCUMFERENCE / time_sec;
+            bike_speed_kmh = speed_mps * 3.6f;
+
+            // 更新最後活動時間 (給 Task 做歸零判定用)
+            last_hall_tick = HAL_GetTick();
+
+            // 除錯用：印出正確的間隔 (應該會是 500000 ~ 1000000 左右，看你手速)
+            // printf("[ISR] Valid Diff: %lu, Speed: %.1f\r\n", diff, bike_speed_kmh);
+        }
     }
+}
+void Alarm_Beep(int times, int duration_ms) {
+    for (int i = 0; i < times; i++) {
+        // 1. 開啟 (響)
+        HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
+        HAL_Delay(duration_ms);
 
-    // 1. 設定「基準時間」 (必須跟你 MX_RTC_Init 設定的一模一樣)
-    // 這是 C 語言標準庫的 struct tm 設定法
-    struct tm start_tm = {0};
-    start_tm.tm_year = 2025 - 1900; // 年份：當前年份 - 1900 (這是規定) -> 125
-    start_tm.tm_mon  = 11 - 1;      // 月份：0~11 (所以 11月要填 10)
-    start_tm.tm_mday = 25;          // 日期：25
-    start_tm.tm_hour = 12;          // 時：12
-    start_tm.tm_min  = 0;           // 分：0
-    start_tm.tm_sec  = 0;           // 秒：0
-    start_tm.tm_isdst = -1;         // 自動判斷日光節約
-
-    // 2. 轉成 Unix Timestamp (秒數)
-    // 這是開機第 0 秒代表的真實時間
-    time_t boot_time_epoch = mktime(&start_tm);
-
-    for (int i = 0; i < logCount; i++) {
-
-        // --- 核心邏輯：基準時間 + 經過時間 ---
-
-        // A. 取得事件發生時，是開機後的第幾秒
-        uint32_t elapsed_seconds = alertLogs[i].event_tick / 1000;
-
-        // B. 加總 = 真實發生時間
-        time_t event_real_time = boot_time_epoch + elapsed_seconds;
-
-        // C. 轉回人類看得懂的格式
-        struct tm *t = localtime(&event_real_time);
-
-        // D. 印出
-        printf("Event [#%d]: %04d-%02d-%02d %02d:%02d:%02d\r\n",
-               i+1,
-               t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-               t->tm_hour, t->tm_min, t->tm_sec);
+        // 2. 關閉 (靜音)
+        HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+        HAL_Delay(duration_ms); // 間隔時間
     }
+}
+void LCD_Clear(void)
+{
+    // 方法：把兩行都印滿空白，就等於清除螢幕了
+    LCD_SetCursor(0, 0);
+    LCD_String("                    "); // 16 個空白
 
-    // 清空紀錄
-    logCount = 0;
-    printf("=== End Report ===\r\n");
+    LCD_SetCursor(1, 0);
+    LCD_String("                    "); // 16 個空白
+
+    // 清除後把游標歸位
+    LCD_SetCursor(0, 0);
 }
 
 /* USER CODE END 4 */
@@ -898,139 +1205,216 @@ void StartDefaultTask(void const * argument)
 void StartSystemTask(void const * argument)
 {
   /* USER CODE BEGIN StartSystemTask */
-  /* Infinite loop */
 
-  GPIO_PinState last_btn_state = BTN_PRESSED_STATE;
-  GPIO_PinState current_btn_state;
+  // 用來記錄上一次的狀態，以偵測是否發生改變
+  // 設為一個不存在的狀態 (如 255) 確保第一次開機一定會刷新螢幕
+  SystemState_t last_loop_state = 255;
 
-  uint32_t btn_press_start_time = 0;
-  uint32_t last_btn_activity = 0;
-  uint8_t  btn_pattern_stage = 0;
-  static uint8_t report_printed = 0;
   /* Infinite loop */
   for(;;)
   {
-    // 1. 初步讀取
+    // =========================================================
+    // Part 0: [新增] 狀態改變偵測 (統一處理 LCD)
+    // =========================================================
+	  if (currentState != last_loop_state)
+	      {
+	      LCD_Clear();
+
+	      if (currentState == STATE_LOCKED) {
+	          // [修改這裡] 上鎖時，顯示這趟騎乘的總熱量
+
+	          // 第一行：顯示騎乘結束
+	          LCD_SetCursor(0, 0);
+	          LCD_String("Locked!       ");
+
+	          // 第二行：顯示總熱量
+	          char msg[20];
+	          snprintf(msg, sizeof(msg), "Total: %.2f kcal", total_kcal);
+	          LCD_SetCursor(1, 0);
+	          LCD_String(msg);
+
+	          // [重要] 顯示完之後，再歸零熱量
+	          total_kcal = 0;
+
+	          // LED 亮起表示上鎖
+	          HAL_GPIO_WritePin(GPIOB, LED2_Pin, GPIO_PIN_SET);
+	          HAL_GPIO_WritePin(GPIOE, LED_RED_Pin, GPIO_PIN_SET);
+	      }
+	      else if (currentState == STATE_UNLOCKED) {
+	          // 解鎖時的畫面 (保持原本的)
+	    	  LCD_SetCursor(0, 0);
+	          LCD_String("Bike Unlocked!  ");
+
+	          // 顯示目前熱量 (剛開始是 0.00)
+	          char msg[20];
+	          snprintf(msg, sizeof(msg), "Kcal: %.2f      ", total_kcal);
+	          LCD_SetCursor(1, 0);
+	          LCD_String(msg);
+
+	          // 重置計時器
+	          last_motion_tick = HAL_GetTick();
+	          last_kcal_calc_tick = HAL_GetTick();
+
+	          HAL_GPIO_WritePin(GPIOB, LED2_Pin, GPIO_PIN_RESET);
+	          HAL_GPIO_WritePin(GPIOE, LED_RED_Pin, GPIO_PIN_RESET);
+
+	      }
+	      last_loop_state = currentState;
+	  }
+
+    // =========================================================
+    // Part 1: 按鈕偵測 (只負責改變 currentState)
+    // =========================================================
     GPIO_PinState raw_state = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
 
-	// 2. 只有當 "讀到的值" 跟 "目前穩定的狀態" 不一樣時，才開始處理
-	if (raw_state != last_btn_state) {
+    if (raw_state != last_btn_state) {
+        osDelay(20);
+        current_btn_state = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
 
-	    // 3. 進入去彈跳 (Debounce) 階段
-	    osDelay(20); // 等待 20ms 讓訊號穩定
+        if (current_btn_state != last_btn_state) {
+            // 超時歸零 Pattern
+            if ((HAL_GetTick() - last_btn_activity) > PATTERN_TIMEOUT) {
+                if (current_btn_state == BTN_PRESSED_STATE) btn_pattern_stage = 0;
+            }
 
-	    // 4. 再次讀取確認
-	    current_btn_state = HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13);
-
-	    // 如果 20ms 後，狀態真的改變了 (不是雜訊)，我們才更新
-	    if (current_btn_state != last_btn_state) {
-
-	    	// 檢查超時 (太久沒按，重置進度)
-	    	if ((HAL_GetTick() - last_btn_activity) > PATTERN_TIMEOUT) {
-	    		if (current_btn_state == BTN_PRESSED_STATE) {
-	    			// 只有在按下時才清空，避免放開瞬間被視為超時
-	    			btn_pattern_stage = 0;
-	    	    }
-	        }
-
-	        // --- 判斷按下 (Rising/Falling 依極性而定) ---
-	    	if (current_btn_state == BTN_PRESSED_STATE) {
-	    		// [按下瞬間]
-	            btn_press_start_time = HAL_GetTick();
-	    	}
-	    	// --- 判斷放開 (處理邏輯) ---
+            if (current_btn_state == BTN_PRESSED_STATE) {
+                btn_press_start_time = HAL_GetTick();
+            }
             else {
-            	// [放開瞬間] -> 計算按住多久
-	            uint32_t press_duration = HAL_GetTick() - btn_press_start_time;
-	    	    last_btn_activity = HAL_GetTick();
+                // 放開按鈕
+                uint32_t press_duration = HAL_GetTick() - btn_press_start_time;
+                last_btn_activity = HAL_GetTick();
 
-	            // ---------------------------------------
-	    	    // 核心邏輯：短-短-長 狀態機
-	            // ---------------------------------------
-	    	    if (press_duration < PRESS_SHORT_MAX && press_duration > 50) {
-	    	    	// === 偵測到【短按】 ===
-	                if (btn_pattern_stage == 0) {
-	                	btn_pattern_stage = 1; // (短)
-	    	        }
-	    	        else if (btn_pattern_stage == 1) {
-	    	        	btn_pattern_stage = 2; // (短-短) -> 等待長按
-	    	        }
-	    	        else {
-	    	        	// 已經在 Stage 2 (原本期待長按)，結果使用者【短按】了
-	    	            // 這代表失敗！
-	    	        	// 但因為這次是一個「短按」，我們可以把它當作「新的一輪的第1個短按」
-	    	            btn_pattern_stage = 0;
-	    	        }
-	    	    }
-	    	    else if (press_duration > PRESS_LONG_MIN) {
-	    	    	// === 偵測到【長按】 ===
-	    	    	if (btn_pattern_stage == 2) {
-	    	    		// 成功！(短-短-長) -> 切換狀態
-	    	            if (currentState == STATE_LOCKED) {
-	    	            	currentState = STATE_UNLOCKED;
-	    	            }
-	    	            else {
-	    	                currentState = STATE_LOCKED;
-	    	            }
-	    	            btn_pattern_stage = 0; // 任務完成，歸零
-	    	    	}
-	    	        else {
-	    	        	// 在錯誤的階段長按 (例如第一下就長按)，重置
-	    	            btn_pattern_stage = 0;
-	    	        }
-	    	    }
-	            // 若介於 Short_Max 和 Long_Min 之間，視為無效操作，不改變狀態或重置
-	    	}
-
-	    	last_btn_state = current_btn_state; // 更新狀態
-	    }
+                // 短按邏輯
+                if (press_duration < PRESS_SHORT_MAX && press_duration > 50) {
+                    if (btn_pattern_stage == 0) btn_pattern_stage = 1;
+                    else if (btn_pattern_stage == 1) btn_pattern_stage = 2;
+                    else btn_pattern_stage = 0;
+                }
+                // 長按邏輯 (觸發切換狀態)
+                else if (press_duration > PRESS_LONG_MIN) {
+                    if (btn_pattern_stage == 2) {
+                        // [修改] 這裡只負責改狀態，LCD 交給 Part 0 處理
+                        if (currentState == STATE_LOCKED) {
+                            currentState = STATE_UNLOCKED;
+                        }
+                        else {
+                            // 手動上鎖前，若要顯示這次騎了多少卡路里，可以暫時覆蓋 LCD
+                            // 但因為 Part 0 會馬上刷新成 "LOCKED"，這個顯示會很快消失
+                            // 簡單作法：直接切換，讓它歸零
+                            currentState = STATE_LOCKED;
+                        }
+                        btn_pattern_stage = 0;
+                    } else {
+                        btn_pattern_stage = 0;
+                    }
+                }
+            }
+            last_btn_state = current_btn_state;
+        }
     }
 
-	// =========================================
-	// Part 2: LED 狀態顯示
-	// =========================================
-	switch (currentState) {
-		case STATE_LOCKED:
-	  		HAL_GPIO_WritePin(GPIOB, LED2_Pin, GPIO_PIN_SET);   // 綠燈 (假設 PB0)
-	  		HAL_GPIO_WritePin(GPIOE, LED_RED_Pin, GPIO_PIN_SET); // 紅燈 (假設 PB7)
-	  		// --- [新增] 防盜監測邏輯 ---
-	  		report_printed = 0;
-	  		// 1. 讀取加速度 (X, Y, Z) 單位通常是 mg
-	  		if (g_MotionDetected == 1) {
+    // =========================================================
+    // Part 2: 持續執行的邏輯 (感測器、計算)
+    // =========================================================
+    switch (currentState) {
+        case STATE_LOCKED:
+            // 防盜偵測
+            if (g_MotionDetected == 1) {
+                // 這裡不用改
+                LCD_SetCursor(1, 0);
+                LCD_String("!! WARNING !!   ");
+                Alarm_Beep(3, 500);
+                // [新增] 寫入歷史紀錄邏輯
+                // 限制：距離上一次寫入至少要過 2 秒 (2000ms)，避免瞬間填滿
+                if ((HAL_GetTick() - last_motion_save_tick) > 2000) {
 
-	  			// --- 發生震動了！ ---
-	  			// A. 寫入 Log
-	  		    if (logCount < MAX_LOG_SIZE) {
-	  		    	alertLogs[logCount].event_tick = HAL_GetTick();
-	  		    	//alertLogs[logCount].max_g = 9999; // 硬體偵測填代碼
-	  		    	logCount++;
-	  	        }
-	  		    printf("ALARM: Motion Detected!\r\n");
+                	// 只有當陣列還沒滿的時候才寫入 (或是你可以改成滿了就覆蓋舊的)
+                    // 這裡示範：存滿 10 筆就不存了，直到解鎖清空
+                    if (history_count < MAX_HISTORY_LEN) {
+                    	// 存入開機後經過的秒數
+                        motion_history[history_count] = HAL_GetTick() / 1000;
+                        history_count++;
+                    }
 
-	  		    // C. 清除旗標 (Reset) - 準備抓下一次
-	            g_MotionDetected = 0;
-	  		}
-	  		break;
-	  	case STATE_UNLOCKED:
-	  		HAL_GPIO_WritePin(GPIOB, LED2_Pin, GPIO_PIN_RESET); // 綠燈
-	  		HAL_GPIO_WritePin(GPIOE, LED_RED_Pin, GPIO_PIN_RESET);   // 紅燈
-	  		// --- [新增] 回傳紀錄邏輯 (只執行一次) ---
-	  		// 2. 如果有殘留的震動旗標，直接清除 (自己人移動不用叫)
-	  		g_MotionDetected = 0;
-            // 3. 回報資料 (只執行一次)
-	  		// 這邊通常會搭配一個 flag 避免迴圈一直印
+                    // 更新最後寫入時間
+                    last_motion_save_tick = HAL_GetTick();
+                }
+                g_MotionDetected = 0; // 清除旗標
 
-	  		if (report_printed == 0) {
+                // 為了讓 "WARNING" 消失並回到 "LOCKED"，可以在這裡設一個 flag
+                // 或是讓 Part 0 的邏輯在下一次循環修復它，不過暫時這樣也可以
+            }
+            if (request_buzzer == 1) {
+            	Alarm_Beep(3, 200); // 叫 3 聲，每聲 200ms
+                request_buzzer = 0; // 處理完畢，歸零
+            }
 
-	  			PrintLogs_BootPlusElapsed();
-	  		    // 標記為已印過
-                report_printed = 1;
-	  		}           	// 如果 Log 被清空了，重置印出旗標，準備下次上鎖
             break;
-	}
-	osDelay(50); // 加速度計不用讀太快，50ms~100ms 一次即可
+
+        case STATE_UNLOCKED:
+            // 1. 取得加速度
+            BSP_ACCELERO_AccGetXYZ(pDataXYZ);
+
+            // 2. 停車歸零邏輯
+            if ((HAL_GetTick() - last_hall_tick) > 3000) {
+                bike_speed_kmh = 0.0f;
+            }
+
+            // 3. METs 與熱量計算 (這段保持你的原樣，沒變)
+            if (bike_speed_kmh < 1.0f) current_mets = 1.0f;
+            else if (bike_speed_kmh < 16.0f) current_mets = 4.0f;
+            else if (bike_speed_kmh < 19.0f) current_mets = 6.8f;
+            else if (bike_speed_kmh < 22.0f) current_mets = 8.0f;
+            else if (bike_speed_kmh < 26.0f) current_mets = 10.0f;
+            else current_mets = 12.0f;
+
+            uint32_t current_tick = HAL_GetTick();
+            float dt_seconds = (current_tick - last_kcal_calc_tick) / 1000.0f;
+            if (current_mets > 1.5f && dt_seconds > 0) {
+                float time_hour = dt_seconds / 3600.0f;
+                total_kcal += current_mets * user_weight * time_hour;
+            }
+            last_kcal_calc_tick = current_tick;
+
+            // 4. 自動上鎖偵測
+            if (bike_speed_kmh > 0.5f) {
+                last_motion_tick = HAL_GetTick();
+                g_MotionDetected = 0;
+            }
+
+            // [修改] 自動上鎖觸發
+            if ((HAL_GetTick() - last_motion_tick) > AUTO_LOCK_TIMEOUT) {
+                // 這裡只要改狀態，Part 0 會負責更新 LCD 和 LED
+                currentState = STATE_LOCKED;
+            }
+
+            // 5. 定時更新 LCD (顯示速度/熱量)
+            // [注意] 這會覆蓋掉 "Bike Unlocked" 字樣，這是正常的
+            if (HAL_GetTick() - last_print > 1000) {
+                char spd_str[20];
+                char row0_buf[22];
+                snprintf(spd_str, sizeof(spd_str), "Speed: %.1f km/h", bike_speed_kmh);
+                snprintf(row0_buf, 21, "%-20.20s", spd_str);
+                LCD_SetCursor(0, 0);
+                LCD_String(row0_buf);
+
+                char cal_str[20];
+                char row1_buf[22];
+                snprintf(cal_str, sizeof(cal_str), "Kcal: %.2f", total_kcal);
+                snprintf(row1_buf, 21, "%-20.20s", cal_str);
+                LCD_SetCursor(1, 0);
+                LCD_String(row1_buf);
+
+                last_print = HAL_GetTick();
+            }
+            break;
+    }
+    osDelay(10);
   }
+  /* USER CODE END StartSystemTask */
 }
+
 /* USER CODE BEGIN Header_StartSensorTask */
 /**
 * @brief Function implementing the SensorTask thread.
@@ -1062,7 +1446,10 @@ void StartCommTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+	// [新增] 處理藍牙事件
+	MX_BlueNRG_MS_Process();
+	osDelay(10); // 給一點時間釋放資源
+
   }
   /* USER CODE END StartCommTask */
 }

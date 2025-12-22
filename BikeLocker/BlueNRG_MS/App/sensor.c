@@ -17,6 +17,7 @@
   */
 
 /* Includes ------------------------------------------------------------------*/
+#include "compiler.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -30,10 +31,16 @@
 #include "bluenrg_gatt_aci.h"
 
 /* Private typedef -----------------------------------------------------------*/
+typedef struct __attribute__((packed)) _evt_gatt_attr_modified {
+  uint16_t conn_handle;
+  uint16_t attr_handle;
+  uint8_t  data_length;
+  uint16_t offset;
+  uint8_t  att_data[1]; /* 變長陣列的起始點 */
+} evt_gatt_attr_modified;
 /* Private define ------------------------------------------------------------*/
 #define  ADV_INTERVAL_MIN_MS  1000
 #define  ADV_INTERVAL_MAX_MS  1200
-
 /* Private macro -------------------------------------------------------------*/
 /* Private variables ---------------------------------------------------------*/
 extern uint8_t bdaddr[BDADDR_SIZE];
@@ -56,7 +63,7 @@ AxesRaw_t q_axes[SEND_N_QUATERNIONS] = {{0, 0, 0}};
 /* Private function prototypes -----------------------------------------------*/
 void GAP_DisconnectionComplete_CB(void);
 void GAP_ConnectionComplete_CB(uint8_t addr[6], uint16_t handle);
-
+extern void aci_gatt_attribute_modified_event(uint16_t Connection_Handle, uint16_t Attr_Handle, uint16_t Offset, uint16_t Attr_Data_Length, uint8_t *Attr_Data);
 /* Private functions ---------------------------------------------------------*/
 
 /*******************************************************************************
@@ -69,24 +76,13 @@ void GAP_ConnectionComplete_CB(uint8_t addr[6], uint16_t handle);
 void Set_DeviceConnectable(void)
 {
   uint8_t ret;
-  const char local_name[] = {AD_TYPE_COMPLETE_LOCAL_NAME,SENSOR_DEMO_NAME};
+  const char local_name[] = {AD_TYPE_COMPLETE_LOCAL_NAME, 'B','i','k','e','L','o','c','k','e','r'};
 
   uint8_t manuf_data[26] = {
-    2,0x0A,0x00, /* 0 dBm */  // Transmission Power
-    8,0x09,SENSOR_DEMO_NAME,  // Complete Name
-    13,0xFF,0x01, /* SKD version */
-    0x80,
-    0x00,
-    0xF4, /* ACC+Gyro+Mag 0xE0 | 0x04 Temp | 0x10 Pressure */
-    0x00, /*  */
-    0x00, /*  */
-    bdaddr[5], /* BLE MAC start -MSB first- */
-    bdaddr[4],
-    bdaddr[3],
-    bdaddr[2],
-    bdaddr[1],
-    bdaddr[0]  /* BLE MAC stop */
-  };
+        2,0x0A,0x00, /* 0 dBm */
+        11,0x09,'B','i','k','e','L','o','c','k','e','r',
+        0,0,0,0,0,0,0,0,0,0,0 /* 剛好補滿 26 */
+      };
 
   manuf_data[18] |= 0x01; /* Sensor Fusion */
 
@@ -95,9 +91,9 @@ void Set_DeviceConnectable(void)
   PRINTF("Set General Discoverable Mode.\n");
 
   ret = aci_gap_set_discoverable(ADV_DATA_TYPE,
-                                (ADV_INTERVAL_MIN_MS*1000)/625,(ADV_INTERVAL_MAX_MS*1000)/625,
-                                 STATIC_RANDOM_ADDR, NO_WHITE_LIST_USE,
-                                 sizeof(local_name), local_name, 0, NULL, 0, 0);
+                                  (ADV_INTERVAL_MIN_MS*1000)/625,(ADV_INTERVAL_MAX_MS*1000)/625,
+                                   STATIC_RANDOM_ADDR, NO_WHITE_LIST_USE,
+                                   sizeof(local_name), local_name, 0, NULL, 0, 0);
 
   aci_gap_update_adv_data(26, manuf_data);
 
@@ -159,8 +155,18 @@ void user_notify(void * pData)
           Read_Request_CB(pr->attr_handle);
         }
         break;
-      }
 
+      // ======== 新增這段 (開始) ========
+      // 這是接收手機 "寫入" (Write) 指令的關鍵
+      case EVT_BLUE_GATT_ATTRIBUTE_MODIFIED:
+        {
+          evt_gatt_attr_modified *evt = (evt_gatt_attr_modified*)blue_evt->data;
+          // 呼叫我們在 app_bluenrg_ms.c 寫好的函式
+          aci_gatt_attribute_modified_event(evt->conn_handle, evt->attr_handle, evt->offset, evt->data_length, evt->att_data);
+        }
+        break;
+      // ======== 新增這段 (結束) ========
+      }
     }
     break;
   }

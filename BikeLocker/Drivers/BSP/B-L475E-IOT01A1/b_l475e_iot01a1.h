@@ -225,12 +225,6 @@ int32_t  BSP_LED_GetState(Led_TypeDef Led);
 #ifdef __cplusplus
 }
 #endif
- void SENSOR_IO_Init(void);
- void SENSOR_IO_DeInit(void);
- void SENSOR_IO_Write(uint8_t Addr, uint8_t Reg, uint8_t Value);
- uint8_t SENSOR_IO_Read(uint8_t Addr, uint8_t Reg);
- void SENSOR_IO_ReadMultiple(uint8_t Addr, uint8_t Reg, uint8_t *pBuffer, uint16_t Length);
- void SENSOR_IO_Delay(uint32_t Delay);
 
 #endif /* __B_L475E_IOT01A1__H */
 

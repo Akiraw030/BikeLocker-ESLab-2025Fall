@@ -20,7 +20,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "b_l475e_iot01a1.h"
 
-
 /** @defgroup BSP BSP
  * @{
  */
@@ -216,7 +215,6 @@ static void LED_USER_GPIO_Init(void) {
 /**
  * @}
  */
-
 //I2C_HandleTypeDef hbus_i2c1;
 int32_t BSP_I2C1_Init(void);
 int32_t BSP_I2C1_DeInit(void);

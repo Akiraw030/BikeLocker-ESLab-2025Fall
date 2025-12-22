@@ -34,6 +34,8 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_rtc_ex.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_spi.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_spi_ex.h \
+ ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_tim.h \
+ ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_tim_ex.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart.h \
  ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart_ex.h \
  ../BlueNRG_MS/Target/hci_tl_interface.h \
@@ -62,7 +64,27 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/stm32l475e_iot01_accelero.h \
  C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/../Components/lsm6dsl/lsm6dsl.h \
  C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/../Components/lsm6dsl/../Common/accelero.h \
- C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/../Components/lsm6dsl/../Common/gyro.h
+ C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/../Components/lsm6dsl/../Common/gyro.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_gap.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/link_layer.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_def.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_types.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_aci.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_aci_const.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/link_layer.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/hci_const.h \
+ ../Middlewares/ST/BlueNRG-MS/hci/hci_tl_patterns/Basic/hci_tl.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_types.h \
+ ../Middlewares/ST/BlueNRG-MS/utils/ble_list.h \
+ ../BlueNRG_MS/Target/bluenrg_conf.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_gatt_server.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/compiler.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_gap_aci.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_gatt_aci.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_l2cap_aci.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_hal_aci.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/bluenrg_updater_aci.h \
+ ../Middlewares/ST/BlueNRG-MS/includes/hci.h
 ../Core/Inc/main.h:
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal.h:
 ../Core/Inc/stm32l4xx_hal_conf.h:
@@ -99,6 +121,8 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_rtc_ex.h:
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_spi.h:
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_spi_ex.h:
+../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_tim.h:
+../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_tim_ex.h:
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart.h:
 ../Drivers/STM32L4xx_HAL_Driver/Inc/stm32l4xx_hal_uart_ex.h:
 ../BlueNRG_MS/Target/hci_tl_interface.h:
@@ -128,3 +152,23 @@ C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/stm32l475e_
 C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/../Components/lsm6dsl/lsm6dsl.h:
 C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/../Components/lsm6dsl/../Common/accelero.h:
 C:/Users/curry/OneDrive/桌面/STM32CubeL4/Drivers/BSP/B-L475E-IOT01/../Components/lsm6dsl/../Common/gyro.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_gap.h:
+../Middlewares/ST/BlueNRG-MS/includes/link_layer.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_def.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_types.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_aci.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_aci_const.h:
+../Middlewares/ST/BlueNRG-MS/includes/link_layer.h:
+../Middlewares/ST/BlueNRG-MS/includes/hci_const.h:
+../Middlewares/ST/BlueNRG-MS/hci/hci_tl_patterns/Basic/hci_tl.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_types.h:
+../Middlewares/ST/BlueNRG-MS/utils/ble_list.h:
+../BlueNRG_MS/Target/bluenrg_conf.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_gatt_server.h:
+../Middlewares/ST/BlueNRG-MS/includes/compiler.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_gap_aci.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_gatt_aci.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_l2cap_aci.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_hal_aci.h:
+../Middlewares/ST/BlueNRG-MS/includes/bluenrg_updater_aci.h:
+../Middlewares/ST/BlueNRG-MS/includes/hci.h:

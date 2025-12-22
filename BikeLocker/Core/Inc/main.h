@@ -55,7 +55,7 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+#define MAX_HISTORY_LEN 10
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -79,8 +79,6 @@ void Error_Handler(void);
 #define ARD_A3_GPIO_Port GPIOC
 #define ARD_A2_Pin GPIO_PIN_3
 #define ARD_A2_GPIO_Port GPIOC
-#define ARD_D1_Pin GPIO_PIN_0
-#define ARD_D1_GPIO_Port GPIOA
 #define ARD_D0_Pin GPIO_PIN_1
 #define ARD_D0_GPIO_Port GPIOA
 #define ARD_D10_Pin GPIO_PIN_2
@@ -101,8 +99,8 @@ void Error_Handler(void);
 #define ARD_A0_GPIO_Port GPIOC
 #define ARD_D3_Pin GPIO_PIN_0
 #define ARD_D3_GPIO_Port GPIOB
-#define ARD_D6_Pin GPIO_PIN_1
-#define ARD_D6_GPIO_Port GPIOB
+#define BUZZER_Pin GPIO_PIN_1
+#define BUZZER_GPIO_Port GPIOB
 #define ARD_D8_Pin GPIO_PIN_2
 #define ARD_D8_GPIO_Port GPIOB
 #define DFSDM1_DATIN2_Pin GPIO_PIN_7
